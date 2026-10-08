@@ -21,6 +21,10 @@ serde_json = "1"
 # Guardar y recuperar el lienzo (PNG) y leer el icono de la ventana.
 png = "0.17"
 
+# En Linux eframe necesita decir qué servidor gráfico usa; en Windows y macOS no hace falta.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+
 [build-dependencies]
 embed-resource = "3"
 
