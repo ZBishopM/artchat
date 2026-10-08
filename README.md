@@ -7,8 +7,13 @@ dibujo en vivo, chat, usuarios con estado y zumbido. Un solo `.exe` portable (~6
 y sin WebView. Habla el mismo protocolo que el cliente Tauri/Svelte, así que se mezcla con él en la misma sala.
 
 **Moverse por el lienzo:** botón central del ratón, `Espacio` + arrastrar, o la rueda (con Mayús, de lado).
-El minimapa (abajo a la derecha) enseña todo el lienzo y el recuadro de lo que ves; un clic o arrastre te lleva allí.
+El minimapa (abajo a la derecha) enseña lo dibujado y el recuadro de lo que ves; un clic o arrastre te lleva allí.
 Las coordenadas de los trazos son las del lienzo, no las de la ventana, igual que en el protocolo.
+
+**El lienzo no tiene borde**: son teselas de 256×256 que solo existen donde hay tinta (memoria proporcional a lo
+dibujado; 2048 teselas = 512 MiB como tope) y se guarda un PNG por tesela en `%APPDATA%\ArtChat\lienzo-x1\`.
+El límite es ±200 000 puntos: los vértices de egui son `f32` y más lejos los trazos empezarían a temblar.
+Esto es para clientes egui: el cliente Tauri antiguo reservaba un canvas hasta la coordenada máxima del historial.
 
     cargo build --release        # target\release\artchat.exe
     cargo test                   # unidades (protocolo, lienzo, paleta)

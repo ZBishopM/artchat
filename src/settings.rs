@@ -75,8 +75,8 @@ impl Settings {
     }
 }
 
-/// El lienzo guardado. La escala va en el nombre: un PNG hecho a 2 texels por punto no sirve
-/// en una pantalla de 1.
-pub fn ruta_lienzo(escala: f32) -> Option<PathBuf> {
-    Some(dir()?.join(format!("lienzo-x{}.png", escala as u32)))
+/// La carpeta del lienzo guardado: un PNG por tesela (`x_y.png`). La escala va en el nombre:
+/// las teselas hechas a 2 texels por punto no sirven en una pantalla de 1.
+pub fn dir_lienzo(escala: f32) -> Option<PathBuf> {
+    Some(dir()?.join(format!("lienzo-x{}", escala as u32)))
 }

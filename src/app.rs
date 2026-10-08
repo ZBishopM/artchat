@@ -72,6 +72,9 @@ pub struct App {
     /// del protocolo). El panorámico mueve esto; los trazos salen ya en coordenadas del lienzo.
     vista: egui::Vec2,
     paneando: bool,
+    /// Lo que abarca el minimapa, fijo mientras se arrastra en él.
+    mini_fijo: Option<egui::Rect>,
+    mini_arrastra: bool,
     /// Tamaño del área de dibujo en el último fotograma, para el minimapa.
     ventana: egui::Vec2,
     lienzo_guardado: Instant,
@@ -112,6 +115,8 @@ impl App {
             trazando: None,
             vista: egui::Vec2::ZERO,
             paneando: false,
+            mini_fijo: None,
+            mini_arrastra: false,
             ventana: egui::Vec2::ZERO,
             lienzo_guardado: Instant::now(),
             lineas: Vec::new(),
@@ -180,11 +185,6 @@ impl App {
                     return;
                 }
                 self.historia_aplicada = true;
-                // El lienzo antes que los trazos: el historial puede venir de ventanas más grandes.
-                let (mx, my) = strokes.iter().fold((0.0f32, 0.0f32), |(x, y), s| (x.max(s.x0).max(s.x1), y.max(s.y0).max(s.y1)));
-                if mx.is_finite() && my.is_finite() {
-                    self.lienzo.ensure(mx + 100.0, my + 100.0);
-                }
                 for s in &strokes {
                     self.aplicar(s, true);
                 }
@@ -237,8 +237,6 @@ impl App {
             }
             self.efimeros.push(Efimero { a, b, size, color, nacio: Instant::now(), dura: Duration::from_millis(ms as u64) });
         } else {
-            self.lienzo.ensure_point(a);
-            self.lienzo.ensure_point(b);
             self.lienzo.segment(a, b, size, color, s.erase);
         }
     }
@@ -248,8 +246,6 @@ impl App {
     /// Un segmento del trazo del usuario: se pinta aquí y se manda al servidor, igual que hacía
     /// el cliente Tauri con cada `mousemove`.
     fn trazar(&mut self, a: Pos2, b: Pos2) {
-        self.lienzo.ensure_point(a);
-        self.lienzo.ensure_point(b);
         let size = self.s.size;
         let efimero = self.s.fade && !self.borrador;
         if self.borrador {
@@ -286,7 +282,6 @@ impl App {
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let origen = resp.rect.min;
         self.ventana = resp.rect.size();
-        self.lienzo.ensure(resp.rect.width(), resp.rect.height());
 
         let teclado_libre = !ctx.wants_keyboard_input();
         let (pulsado, abajo, medio, medio_pulsado, espacio, rueda, delta, eventos, ptr) = ctx.input(|i| {
@@ -317,7 +312,7 @@ impl App {
         } else if resp.hovered() {
             self.vista -= rueda;
         }
-        self.vista = limita_vista(self.vista, resp.rect.size());
+        self.vista = limita_vista(self.vista);
 
         let vista = self.vista;
         let local = move |p: Pos2| p - origen.to_vec2() + vista;
@@ -355,8 +350,11 @@ impl App {
 
         self.lienzo.flush(&ctx);
         painter.rect_filled(resp.rect, 0.0, col(self.s.bg));
-        let origen_mundo = origen - self.vista;
-        self.lienzo.paint(&painter, origen_mundo);
+        // Al píxel físico: las teselas van pegadas, y con una posición fraccionaria el filtro
+        // lineal dejaría una rendija en cada unión.
+        let pp = ctx.pixels_per_point();
+        let origen_mundo = Pos2::new(((origen.x - self.vista.x) * pp).round() / pp, ((origen.y - self.vista.y) * pp).round() / pp);
+        self.lienzo.paint(&painter, origen_mundo, 1.0);
         let ahora = Instant::now();
         self.efimeros.retain(|e| e.vida(ahora) > 0.0);
         for e in &self.efimeros {
@@ -615,31 +613,37 @@ impl App {
         if win.x < 560.0 {
             return;
         }
-        let lienzo = self.lienzo.size_pts();
-        // Lo que abarca: el lienzo pintado, o la ventana si se ha ido más allá de él.
-        let ext = vec2(lienzo.x.max(self.vista.x + win.x).max(win.x), lienzo.y.max(self.vista.y + win.y).max(win.y));
-        let k = (180.0 / ext.x).min(120.0 / ext.y);
+        // Lo que abarca: lo dibujado y lo que se ve ahora, con un poco de aire. Mientras se arrastra
+        // en el minimapa se congela, o el mapa se re-escalaría bajo el dedo a cada movimiento.
+        let visible = egui::Rect::from_min_size(Pos2::ZERO + self.vista, win);
+        let ext = match self.mini_fijo {
+            Some(r) if self.mini_arrastra => r,
+            _ => self.lienzo.limites().map_or(visible, |l| l.union(visible)).expand(win.x.min(win.y) * 0.1),
+        };
+        self.mini_fijo = Some(ext);
+        let k = (180.0 / ext.width()).min(120.0 / ext.height());
+        let mut arrastra = false;
         egui::Area::new(Id::new("minimapa")).order(Order::Foreground).anchor(Align2::RIGHT_BOTTOM, vec2(-14.0, -14.0)).show(ctx, |ui| {
             Self::isla().inner_margin(Margin::same(6.0)).show(ui, |ui| {
-                let (rect, resp) = ui.allocate_exact_size(ext * k, Sense::click_and_drag());
+                let (rect, resp) = ui.allocate_exact_size(ext.size() * k, Sense::click_and_drag());
                 let p = ui.painter_at(rect);
                 p.rect_filled(rect, Rounding::same(4.0), col(self.s.bg));
-                if let Some(t) = self.lienzo.textura() {
-                    let uv = egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                    p.image(t, egui::Rect::from_min_size(rect.min, lienzo * k), uv, Color32::WHITE);
-                }
-                let visto = egui::Rect::from_min_size(rect.min + self.vista * k, win * k);
+                // El (0,0) del lienzo cae a `-ext.min * k` de la esquina del minimapa.
+                self.lienzo.paint(&p, rect.min - ext.min.to_vec2() * k, k);
+                let visto = egui::Rect::from_min_size(rect.min + (visible.min - ext.min) * k, win * k);
                 p.rect(visto, Rounding::same(2.0), col_a(ACCENT, 0.14), Stroke::new(1.0_f32, col(ACCENT)));
                 if resp.is_pointer_button_down_on() {
+                    arrastra = true;
                     if let Some(pos) = resp.interact_pointer_pos() {
-                        let mundo = (pos - rect.min) / k;
-                        self.vista = limita_vista(mundo - win * 0.5, win);
+                        let mundo = ext.min + (pos - rect.min) / k;
+                        self.vista = limita_vista(mundo.to_vec2() - win * 0.5);
                     }
                 }
                 resp.on_hover_text("Minimapa: clic o arrastre para moverte\nPanorámica: botón central, Espacio + arrastrar o la rueda")
                     .on_hover_cursor(CursorIcon::PointingHand);
             });
         });
+        self.mini_arrastra = arrastra;
     }
 
     /// El zumbido sacude la interfaz medio segundo (el `buzz-shake` del cliente Tauri). Se
@@ -673,26 +677,18 @@ impl App {
         self.listo = true;
         let escala = if ctx.pixels_per_point() >= 1.5 { 2.0 } else { 1.0 };
         self.lienzo = Canvas::new(escala);
-        if let Some(bytes) = settings::ruta_lienzo(escala).and_then(|p| std::fs::read(p).ok()) {
-            let _ = self.lienzo.from_png(&bytes);
+        if let Some(dir) = settings::dir_lienzo(escala) {
+            self.lienzo.cargar(&dir);
         }
     }
 
     fn guarda_lienzo(&mut self, ahora_mismo: bool) {
-        let Some(ruta) = settings::ruta_lienzo(self.lienzo.scale()) else { return };
-        if !self.lienzo.por_guardar {
+        let Some(dir) = settings::dir_lienzo(self.lienzo.scale()) else { return };
+        if !self.lienzo.hay_cambios() {
             return;
         }
-        self.lienzo.por_guardar = false;
         let foto = self.lienzo.foto();
-        let escribe = move || {
-            if let Some(png) = foto.to_png() {
-                let tmp = ruta.with_extension("tmp");
-                if std::fs::write(&tmp, png).is_ok() {
-                    let _ = std::fs::rename(tmp, ruta);
-                }
-            }
-        };
+        let escribe = move || foto.guardar(&dir);
         // En segundo plano mientras se dibuja; al cerrar hay que esperar.
         if ahora_mismo {
             escribe();
@@ -818,10 +814,10 @@ fn linea(l: &Linea) -> LayoutJob {
     j
 }
 
-/// La vista no sale del lienzo posible (0 a `MAX_PTS` en cada eje).
-fn limita_vista(v: egui::Vec2, ventana: egui::Vec2) -> egui::Vec2 {
-    let tope = |ventana: f32| (crate::canvas::MAX_PTS - ventana).max(0.0);
-    vec2(v.x.clamp(0.0, tope(ventana.x)), v.y.clamp(0.0, tope(ventana.y)))
+/// La vista no sale del lienzo posible (±`LIM_PTS` en cada eje; sin borde práctico).
+fn limita_vista(v: egui::Vec2) -> egui::Vec2 {
+    let l = crate::canvas::LIM_PTS;
+    vec2(v.x.clamp(-l, l), v.y.clamp(-l, l))
 }
 
 /// Lo inverso de `tiempo`, para teclear el valor en el deslizador: «3», «3 s», «1,5 min».
@@ -903,7 +899,7 @@ mod tests {
         fotograma(&ctx, &mut app, vec![Ev::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Default::default() }]);
 
         // en el lienzo: tinta ámbar donde se pulsó y a mitad de camino
-        let tinta = |x: usize, y: usize| app.lienzo.pixel(x, y);
+        let tinta = |x: i32, y: i32| app.lienzo.pixel(x, y);
         assert_eq!(tinta(600, 400), col(ACCENT), "no hay tinta donde se pulsó");
         assert!(tinta(660, 425).a() > 200, "no hay tinta a mitad del trazo");
         assert_eq!(tinta(600, 460).a(), 0, "hay tinta donde no se pasó");
@@ -958,11 +954,33 @@ mod tests {
     }
 
     #[test]
-    fn la_vista_no_sale_del_lienzo() {
-        let v = limita_vista(vec2(-50.0, 99_999.0), vec2(1280.0, 800.0));
-        assert_eq!(v.x, 0.0);
-        assert_eq!(v.y, crate::canvas::MAX_PTS - 800.0);
-        assert_eq!(limita_vista(vec2(10.0, 10.0), vec2(9000.0, 9000.0)), vec2(0.0, 0.0));
+    fn la_vista_no_tiene_borde_salvo_el_limite_de_precision() {
+        let l = crate::canvas::LIM_PTS;
+        assert_eq!(limita_vista(vec2(-50.0, 10.0)), vec2(-50.0, 10.0)); // hacia atrás del origen sí
+        assert_eq!(limita_vista(vec2(-9e9, 9e9)), vec2(-l, l));
+    }
+
+    /// Se puede ir al otro lado del origen y dibujar allí: el trazo se guarda con coordenadas
+    /// negativas, que es lo que verá cualquier otro cliente.
+    #[test]
+    fn se_dibuja_a_la_izquierda_y_arriba_del_origen() {
+        let (ctx, mut app) = app_sin_red();
+        let a = pos2(600.0, 400.0);
+        fotograma(&ctx, &mut app, vec![Ev::PointerMoved(a)]);
+        fotograma(&ctx, &mut app, vec![]);
+        let medio = |p, pressed| Ev::PointerButton { pos: p, button: PointerButton::Middle, pressed, modifiers: Default::default() };
+        fotograma(&ctx, &mut app, vec![medio(a, true)]);
+        fotograma(&ctx, &mut app, vec![Ev::PointerMoved(pos2(900.0, 700.0))]); // arrastra 300 a la derecha y abajo
+        fotograma(&ctx, &mut app, vec![medio(pos2(900.0, 700.0), false)]);
+        assert_eq!(app.vista, vec2(-300.0, -300.0));
+
+        let p = pos2(100.0, 100.0); // pantalla -> lienzo (-200,-200)
+        fotograma(&ctx, &mut app, vec![Ev::PointerMoved(p)]);
+        fotograma(&ctx, &mut app, vec![]);
+        let izq = |pressed| Ev::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        fotograma(&ctx, &mut app, vec![izq(true)]);
+        fotograma(&ctx, &mut app, vec![izq(false)]);
+        assert_eq!(app.lienzo.pixel(-200, -200), col(ACCENT));
     }
 
     #[test]
