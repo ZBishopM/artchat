@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use egui::{Color32, ColorImage, Context, Painter, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 
 /// Lado máximo del lienzo en puntos lógicos. Un trazo fuera de esto se recorta.
-const MAX_PTS: f32 = 4096.0;
+pub const MAX_PTS: f32 = 4096.0;
 /// Se crece de 128 en 128 texels: así arrastrar el borde de la ventana no realoca por píxel.
 const PASO: usize = 128;
 
@@ -152,6 +152,10 @@ impl Canvas {
             }
             (Some(_), None) => {}
         }
+    }
+
+    pub fn textura(&self) -> Option<egui::TextureId> {
+        self.tex.as_ref().map(|t| t.id())
     }
 
     /// Pinta el lienzo con su esquina superior izquierda en `origen`.

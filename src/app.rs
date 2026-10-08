@@ -68,6 +68,12 @@ pub struct App {
     borrador: bool,
     /// Último punto del trazo en curso, en coordenadas del lienzo.
     trazando: Option<Pos2>,
+    /// Esquina superior izquierda de la ventana sobre el lienzo, en coordenadas del lienzo (las
+    /// del protocolo). El panorámico mueve esto; los trazos salen ya en coordenadas del lienzo.
+    vista: egui::Vec2,
+    paneando: bool,
+    /// Tamaño del área de dibujo en el último fotograma, para el minimapa.
+    ventana: egui::Vec2,
     lienzo_guardado: Instant,
 
     lineas: Vec<Linea>,
@@ -104,6 +110,9 @@ impl App {
             efimeros: Vec::new(),
             borrador: false,
             trazando: None,
+            vista: egui::Vec2::ZERO,
+            paneando: false,
+            ventana: egui::Vec2::ZERO,
             lienzo_guardado: Instant::now(),
             lineas: Vec::new(),
             entrada: String::new(),
@@ -239,6 +248,8 @@ impl App {
     /// Un segmento del trazo del usuario: se pinta aquí y se manda al servidor, igual que hacía
     /// el cliente Tauri con cada `mousemove`.
     fn trazar(&mut self, a: Pos2, b: Pos2) {
+        self.lienzo.ensure_point(a);
+        self.lienzo.ensure_point(b);
         let size = self.s.size;
         let efimero = self.s.fade && !self.borrador;
         if self.borrador {
@@ -274,18 +285,49 @@ impl App {
         let ctx = ui.ctx().clone();
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let origen = resp.rect.min;
+        self.ventana = resp.rect.size();
         self.lienzo.ensure(resp.rect.width(), resp.rect.height());
 
-        let (pulsado, abajo, eventos, ptr) =
-            ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.events.clone(), i.pointer.hover_pos()));
-        let local = |p: Pos2| p - origen.to_vec2();
-        if pulsado && resp.hovered() {
+        let teclado_libre = !ctx.wants_keyboard_input();
+        let (pulsado, abajo, medio, medio_pulsado, espacio, rueda, delta, eventos, ptr) = ctx.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.middle_down(),
+                i.pointer.button_pressed(egui::PointerButton::Middle),
+                i.key_down(egui::Key::Space),
+                i.smooth_scroll_delta,
+                i.pointer.delta(),
+                i.events.clone(),
+                i.pointer.hover_pos(),
+            )
+        });
+        let espacio = espacio && teclado_libre;
+
+        // Panorámico: botón del medio, o espacio + arrastrar, o la rueda (con Mayús, de lado).
+        let arrastre = medio || (espacio && abajo);
+        if !arrastre {
+            self.paneando = false;
+        } else if (medio_pulsado || pulsado) && resp.hovered() {
+            self.paneando = true;
+        }
+        if self.paneando {
+            self.vista -= delta;
+            self.trazando = None;
+        } else if resp.hovered() {
+            self.vista -= rueda;
+        }
+        self.vista = limita_vista(self.vista, resp.rect.size());
+
+        let vista = self.vista;
+        let local = move |p: Pos2| p - origen.to_vec2() + vista;
+        if pulsado && resp.hovered() && !espacio {
             if let Some(p) = ptr.map(local) {
                 self.trazar(p, p); // el punto de la pulsación, como el `arc` del cliente Tauri
                 self.trazando = Some(p);
             }
         }
-        if !abajo {
+        if !abajo || self.paneando {
             self.trazando = None;
         } else if let Some(mut ult) = self.trazando {
             // Cada movimiento que llegó en el fotograma, no solo el último: así el trazo no
@@ -313,18 +355,23 @@ impl App {
 
         self.lienzo.flush(&ctx);
         painter.rect_filled(resp.rect, 0.0, col(self.s.bg));
-        self.lienzo.paint(&painter, origen);
+        let origen_mundo = origen - self.vista;
+        self.lienzo.paint(&painter, origen_mundo);
         let ahora = Instant::now();
         self.efimeros.retain(|e| e.vida(ahora) > 0.0);
         for e in &self.efimeros {
-            e.paint(&painter, origen, ahora);
+            e.paint(&painter, origen_mundo, ahora);
         }
         if !self.efimeros.is_empty() {
             ctx.request_repaint();
         }
 
         // El cursor es un aro del tamaño del pincel: se ve dónde va a caer el trazo.
-        if resp.hovered() {
+        if self.paneando {
+            ctx.set_cursor_icon(CursorIcon::Grabbing);
+        } else if resp.hovered() && espacio {
+            ctx.set_cursor_icon(CursorIcon::Grab);
+        } else if resp.hovered() {
             ctx.set_cursor_icon(CursorIcon::None);
             if let Some(p) = ptr {
                 let r = (self.s.size * 0.5).max(1.5);
@@ -560,11 +607,46 @@ impl App {
         });
     }
 
+    /// El minimapa: todo el lienzo en pequeño con el recuadro de lo que se ve. Un clic o un
+    /// arrastre centra la vista donde se toca.
+    fn minimapa(&mut self, ctx: &Context) {
+        let win = self.ventana;
+        // En una ventana diminuta taparía el chat.
+        if win.x < 560.0 {
+            return;
+        }
+        let lienzo = self.lienzo.size_pts();
+        // Lo que abarca: el lienzo pintado, o la ventana si se ha ido más allá de él.
+        let ext = vec2(lienzo.x.max(self.vista.x + win.x).max(win.x), lienzo.y.max(self.vista.y + win.y).max(win.y));
+        let k = (180.0 / ext.x).min(120.0 / ext.y);
+        egui::Area::new(Id::new("minimapa")).order(Order::Foreground).anchor(Align2::RIGHT_BOTTOM, vec2(-14.0, -14.0)).show(ctx, |ui| {
+            Self::isla().inner_margin(Margin::same(6.0)).show(ui, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(ext * k, Sense::click_and_drag());
+                let p = ui.painter_at(rect);
+                p.rect_filled(rect, Rounding::same(4.0), col(self.s.bg));
+                if let Some(t) = self.lienzo.textura() {
+                    let uv = egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                    p.image(t, egui::Rect::from_min_size(rect.min, lienzo * k), uv, Color32::WHITE);
+                }
+                let visto = egui::Rect::from_min_size(rect.min + self.vista * k, win * k);
+                p.rect(visto, Rounding::same(2.0), col_a(ACCENT, 0.14), Stroke::new(1.0_f32, col(ACCENT)));
+                if resp.is_pointer_button_down_on() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let mundo = (pos - rect.min) / k;
+                        self.vista = limita_vista(mundo - win * 0.5, win);
+                    }
+                }
+                resp.on_hover_text("Minimapa: clic o arrastre para moverte\nPanorámica: botón central, Espacio + arrastrar o la rueda")
+                    .on_hover_cursor(CursorIcon::PointingHand);
+            });
+        });
+    }
+
     /// El zumbido sacude la interfaz medio segundo (el `buzz-shake` del cliente Tauri). Se
     /// sacude el contenido, no la ventana: con un gestor de ventanas en mosaico la ventana
     /// no se deja mover.
     fn sacudir(&mut self, ctx: &Context) {
-        let ids = [Id::new("barra"), Id::new("usuarios"), Id::new("chat")];
+        let ids = [Id::new("barra"), Id::new("usuarios"), Id::new("chat"), Id::new("minimapa")];
         let pon = |dx: f32| {
             let t = TSTransform::from_translation(vec2(dx, 0.0));
             ctx.set_transform_layer(LayerId::background(), t);
@@ -653,6 +735,7 @@ impl App {
         self.barra(ctx);
         self.usuarios_ui(ctx);
         self.chat_ui(ctx);
+        self.minimapa(ctx);
 
         // Preferencias: a disco 0,4 s después del último cambio, no en cada fotograma.
         if self.s != self.guardado {
@@ -733,6 +816,12 @@ fn linea(l: &Linea) -> LayoutJob {
         }
     }
     j
+}
+
+/// La vista no sale del lienzo posible (0 a `MAX_PTS` en cada eje).
+fn limita_vista(v: egui::Vec2, ventana: egui::Vec2) -> egui::Vec2 {
+    let tope = |ventana: f32| (crate::canvas::MAX_PTS - ventana).max(0.0);
+    vec2(v.x.clamp(0.0, tope(ventana.x)), v.y.clamp(0.0, tope(ventana.y)))
 }
 
 /// Lo inverso de `tiempo`, para teclear el valor en el deslizador: «3», «3 s», «1,5 min».
@@ -832,6 +921,48 @@ mod tests {
         assert_eq!((primero.x0, primero.y0, primero.x1, primero.y1), (600.0, 400.0, 600.0, 400.0));
         assert_eq!((ultimo.x1, ultimo.y1), (p.x, p.y));
         assert!(recibidos.iter().all(|s| !s.ephemeral && !s.erase && s.size == Some(5.0) && s.color.as_deref() == Some("#e0a35c")));
+    }
+
+    fn app_sin_red() -> (Context, App) {
+        std::env::set_var("APPDATA", std::env::temp_dir().join("artchat-prueba-pan"));
+        let ctx = Context::default();
+        let app = App::con(&ctx, Settings::default(), "ws://127.0.0.1:1".into());
+        (ctx, app)
+    }
+
+    /// El botón central arrastra la vista (y no dibuja); lo dibujado después sale en
+    /// coordenadas del lienzo, no de la ventana.
+    #[test]
+    fn el_panoramico_mueve_la_vista_y_los_trazos_salen_en_coordenadas_del_lienzo() {
+        let (ctx, mut app) = app_sin_red();
+        let a = pos2(600.0, 400.0);
+        fotograma(&ctx, &mut app, vec![Ev::PointerMoved(a)]);
+        fotograma(&ctx, &mut app, vec![]);
+        let medio = |p, pressed| Ev::PointerButton { pos: p, button: PointerButton::Middle, pressed, modifiers: Default::default() };
+        fotograma(&ctx, &mut app, vec![medio(a, true)]);
+        // arrastrar 100 a la izquierda y 50 hacia arriba: la vista avanza 100 y 50
+        fotograma(&ctx, &mut app, vec![Ev::PointerMoved(pos2(500.0, 350.0))]);
+        fotograma(&ctx, &mut app, vec![medio(pos2(500.0, 350.0), false)]);
+        assert_eq!(app.vista, vec2(100.0, 50.0));
+        assert!(app.lienzo.pixel(600, 400).a() == 0, "el panorámico no debe pintar");
+
+        // ahora un clic con el pincel en (300,200) de la pantalla = (400,250) del lienzo
+        let p = pos2(300.0, 200.0);
+        fotograma(&ctx, &mut app, vec![Ev::PointerMoved(p)]);
+        fotograma(&ctx, &mut app, vec![]);
+        let izq = |pressed| Ev::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        fotograma(&ctx, &mut app, vec![izq(true)]);
+        fotograma(&ctx, &mut app, vec![izq(false)]);
+        assert_eq!(app.lienzo.pixel(400, 250), col(ACCENT));
+        assert_eq!(app.lienzo.pixel(300, 200).a(), 0);
+    }
+
+    #[test]
+    fn la_vista_no_sale_del_lienzo() {
+        let v = limita_vista(vec2(-50.0, 99_999.0), vec2(1280.0, 800.0));
+        assert_eq!(v.x, 0.0);
+        assert_eq!(v.y, crate::canvas::MAX_PTS - 800.0);
+        assert_eq!(limita_vista(vec2(10.0, 10.0), vec2(9000.0, 9000.0)), vec2(0.0, 0.0));
     }
 
     #[test]

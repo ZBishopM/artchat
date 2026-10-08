@@ -6,6 +6,10 @@ Cliente para el relé `art-chat-server`:
 dibujo en vivo, chat, usuarios con estado y zumbido. Un solo `.exe` portable (~6,5 MB), sin instalador
 y sin WebView. Habla el mismo protocolo que el cliente Tauri/Svelte, así que se mezcla con él en la misma sala.
 
+**Moverse por el lienzo:** botón central del ratón, `Espacio` + arrastrar, o la rueda (con Mayús, de lado).
+El minimapa (abajo a la derecha) enseña todo el lienzo y el recuadro de lo que ves; un clic o arrastre te lleva allí.
+Las coordenadas de los trazos son las del lienzo, no las de la ventana, igual que en el protocolo.
+
     cargo build --release        # target\release\artchat.exe
     cargo test                   # unidades (protocolo, lienzo, paleta)
 
