@@ -1,0 +1,77 @@
+name: release
+
+# Un tag `v*` compila Windows, Linux y macOS (Intel y Apple Silicon) y publica
+# la release con un archivo por plataforma.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archivo: ArtChat-windows-x64.exe
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archivo: ArtChat-linux-x64.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archivo: ArtChat-macos-intel.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archivo: ArtChat-macos-apple-silicon.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Dependencias de Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libasound2-dev
+      - name: Pruebas
+        run: cargo test --target ${{ matrix.target }}
+      - name: Compilar
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Empaquetar (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/artchat.exe "${{ matrix.archivo }}"
+      - name: Empaquetar (Linux y macOS)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x target/${{ matrix.target }}/release/artchat
+          tar -czf "${{ matrix.archivo }}" -C target/${{ matrix.target }}/release artchat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archivo }}
+          path: ${{ matrix.archivo }}
+
+  publicar:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Crear la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "ArtChat ${{ github.ref_name }}" \
+            --notes "Refactor de art-chat-rs (Tauri + Svelte) a Rust nativo con egui. Un archivo por plataforma, sin instalador: en Windows es el .exe; en Linux y macOS, descomprimir y ejecutar \`artchat\` (en macOS la primera vez hay que abrirlo con clic derecho > Abrir, no está firmado)."
