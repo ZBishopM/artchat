@@ -34,7 +34,7 @@ Para probar contra un servidor de verdad (`node chat-server.js` con `PORT=18480`
 | `canvas.rs` | el lienzo es una capa de píxeles: cada segmento se rasteriza una vez y la GPU solo recibe la caja que cambió; borrar es borrar de verdad |
 | `theme.rs` | identidad de windots: paleta cálida, JetBrains Mono Nerd Font (incrustada), radios 14/8 |
 | `audio.rs` | los tres MP3 con MCI de Windows, sin motor de audio |
-| `settings.rs` | `%APPDATA%\ArtChat\settings.json` y `lienzo-x1.png` (el dibujo sobrevive al cierre) |
+| `settings.rs` | `%APPDATA%\ArtChat\settings.json` y la carpeta `lienzo-x1\` (el dibujo sobrevive al cierre) |
 | `app.rs` | la ventana: lienzo a sangre y tres islas flotantes |
 
 ## Decisiones que conviene no deshacer
