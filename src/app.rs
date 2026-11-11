@@ -18,7 +18,7 @@ use crate::settings::{self, Settings};
 use crate::theme::{self, col, col_a, icono, ACCENT, ACCENT_OK, ACCENT_WARN, ATARDECER, BAR_BG, HIGHLIGHT, SUBTEXT, SURFACE, TEXT};
 use crate::types::{parse_hex, to_hex, In, Out, Seg, User};
 
-const URL: &str = "wss://artchat.danassistantassistant.website";
+const URL: &str = "wss://artchat.agapornis.app";
 /// Lo que se espera entre un zumbido y el siguiente (el cliente Tauri: 3 s).
 const ENFRIAR_ZUMBIDO: Duration = Duration::from_secs(3);
 const DURA_SACUDIDA: f32 = 0.5;
